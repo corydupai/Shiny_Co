@@ -30,8 +30,6 @@ do
 		fasterq-dump $name -O $folder/fastq -e 8
 	# If ID is nanopore, use fastq-dump to get fastq files
 	else
-		rm -r SRA_Output/$name
-		mkdir SRA_Output/$name
 		fastq-dump --table SEQUENCE $name -O $folder/fastq
 	fi
 # This feads whatever
