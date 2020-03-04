@@ -29,7 +29,7 @@ names(match.table) [76] <- "total"
 
 # Filter poor matches
 hist(match.table$total)
-cutoff = 0
+cutoff = 0 # Alter
 match.table %>% 
   filter(total > cutoff) %>% 
   summarise(sum(total)) %>% 
@@ -44,11 +44,11 @@ while(cutoff < 75)
     filter(total > cutoff) %>% 
     summarise(sum(total)))
   cutoff.vect <- append(cutoff.vect, cutoff)
-  cutoff <- cutoff +10
+  cutoff <- cutoff +1
 }
-plot(cutoff.vect, sum.vect)
-
-
+filter.ortho <- cbind(cutoff.vect, sum.vect)
+colnames(filter.ortho) <- c("cutoff.number", "total.strains")
+plot(filter.ortho, main = "Remaining total strains by cutoff number", pch = 1, cex = 0.4)
 
 
 
