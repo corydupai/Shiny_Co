@@ -37,7 +37,7 @@ do
                 # If ID isn't nanopore, use fasterq-dump to get fastq files
                 if [[ $size -eq 0 ]]; then
                         echo "Fasterq $name"
-                        #fasterq-dump $name -O $folder/fastq -e 8 -f &
+                        #fasterq-dump $name -O $folder/fastq -e 8 -f
 			#prefetch $name
 			#fastq-dump --split-files $name -O $folder/fastq --skip-technical
                 # If ID is nanopore, use fastq-dump to get fastq files

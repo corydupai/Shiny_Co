@@ -1,2 +1,0 @@
-Run information downloaded from SRA on Jan 27th 2020 at ~12PM.
-Data associated with each SRA downloaded from SRA on Feb 20th at ~5:30PM.
