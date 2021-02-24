@@ -1,12 +1,6 @@
-# WGCNA_expanded
-Code to perform WGCNA analyses on bacterial datasets from SRA.
+# Shiny Co
+This repository houses a Shiny application that visualizes Coexpression Network Data for some of the most highly studied bacterial species.
 
-Basic pipeline will be as follows:
-
-1. Search SRA using the Organism and Strategy options and download runinfo and accession list from SRA.
-2. Add files along with list of nanopore extensions to a folder in the WGCNA_expanded repository. Also update the notes section to include sample collection date/time.
-3. Run get_fastq.bash with your folder specified via the -f option.
-4. Make transcriptome for your organism (need to plan how to do this).
-5. Run Kallisto on your reads.
-6. R script to normalize reads and do WGCNA (code not included yet).
+To run the ShinyCo app:
+- Instructions coming...
 
