@@ -16,3 +16,12 @@
 *.att
 *.blast
 *.list
+*.RDS
+*.bak
+*.rds
+*.abundance.*
+*.idx
+*.gbff
+*.RData
+*.run_info.json
+*.Rhistory

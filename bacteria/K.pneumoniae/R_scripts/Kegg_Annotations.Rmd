@@ -1,0 +1,148 @@
+---
+title: "Kegg Annotations & Gene Enrichment Analysis"
+author: "Tanvi Ingle"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(KEGGREST)
+library(qdapTools)
+library(tidyverse)
+library(dplyr)
+library(seqinr)
+library(parallel)
+library(clusterProfiler)
+# install.packages("clusterProfiler")
+## https://bioconductor.org/packages/3.6/bioc/html/clusterProfiler.html for R 3.4
+```
+
+Steps: 
+
+1. Filter Match.table based on Filtered centroids.fasta file (cutoff_9) 
+```{r}
+# Import filtered centroids file
+cutoff_9 <- list2df(read.fasta("/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/cutoff_9.fasta"))
+
+centroids_to_annotation <- cutoff_9 %>% 
+  select(-X1) %>% 
+  mutate(centroid = X2) %>% 
+  separate(`X2`, c("centroid_text", "id_number"), "_" ) %>% 
+  select(-centroid_text) %>% 
+  summarise(id_number = unique(id_number), centroid = unique(centroid)) 
+
+# Get match.table 
+match.table <- read.table("/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/panoct_output/pangenome/results/matchtable.txt", header=FALSE)
+
+# Merge centroids & match table to filter; make longer
+filter_match_table <- match.table %>% 
+  rename(id_number = V1) %>% 
+  merge(centroids_to_annotation, by="id_number") %>% 
+  pivot_longer(-id_number) %>% 
+  select(-name) %>% 
+  rename(loci = value)
+
+# Clean up environment
+remove(cutoff_9, centroids_to_annotation)
+
+```
+
+
+2. Find genes & corresponding function -- (https://www.genome.jp/kegg/catalog/org_list.html); Format 
+```{r}
+# Get T() Number for all reference genomes & call keggList() for organism name:gene loci keys. 
+t_codes <- c("T00566", "T00910", "T01733", "T02213", "T03369", "T03370", "T03465",
+       "T03466", "T03467", "T03468", "T03788", "T03371", "T03418", "T01982",
+       "T02793", "T02799", "T02866", "T03176", "T03177", "T03419", "T03440",
+       "T03746", "T03747", "T05281")
+
+
+# Get all org:loci associated with each T()
+reference_t <- data.frame()
+for(t in t_codes)
+{
+  kegg_t <- list2df(keggList(t)) %>% 
+    transmute(`protein_annotation` = X1, `org_loci` = X2)
+  
+  reference_t <- rbind(reference_t, kegg_t)
+}
+
+# Filter entries in reference_t by gene loci in filter_match_table
+klebsiella_entries <- reference_t %>% 
+  mutate(temp = org_loci) %>% 
+  separate(temp, c("org", "loci"), sep = ":") %>% 
+  merge(filter_match_table, by="loci") 
+  
+# Function to get annotations and format into dataframe
+
+get_annotations.func <- function(loci)
+{
+  print(loci)
+  gene.df <- list2df(keggGet(loci))[1,]
+  # gene.df <- keggGet("kpu:KP1_0001")[1]
+  # colnames(gene.df) <- c("gene", "RefSeq", "protein", "ref_genome",
+  #                   "kegg_ortholog", "Brite", "umbrella_pathway", "pathway",
+  #                   "gene_2", "complement", "protein_family", "NCBI_GeneID",
+  #                   "NCBI_ProteinID", "UniProt", "aa_seq", "nt_seq", "num")
+  return(gene.df)
+}
+
+# Get annotations for each gene:loci combination
+# remove(klebsiella.annotations)
+
+# klebsiella.annotations.test <-mclapply(klebsiella_entries[1:200,]$org_loci, get_annotations.func, mc.cores = 10)
+
+############# WRITE ####################
+# klebsiella.annotations <- lapply(klebsiella_entries$org_loci, get_annotations.func)
+
+# klebsiella.annotations.df <- list2df(klebsiella.annotations)
+
+# write.csv(klebsiella.annotations.df, "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/annotations.csv")
+
+klebsiella.annotations.df <- read.csv("/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/annotations.csv")
+
+kp.filtered <- klebsiella.annotations.df %>% 
+   group_by(X2) %>% 
+   mutate(loci = X1[1], protein = X1[2], centroid = paste0("centroid_", X2)) %>% 
+   filter(stringr::str_detect(X1, stringr::regex("[:blank:]\\d\\d")) |
+          stringr::str_detect(X1, stringr::regex("[:blank:]\\d\\."))) %>%
+   filter(!stringr::str_detect(X1, stringr::regex("Klebsiella pneumoniae"))) %>% 
+   rename(annotations = X1, id_number = X2) %>% 
+   merge(klebsiella_entries, by = c("id_number")) %>% 
+   select(-id_number, -org_loci, -org, -loci.x) %>% 
+   select(centroid, loci.y, protein, protein_annotation, annotations) %>% 
+   arrange(centroid) %>% 
+  group_by(centroid, annotations) %>% 
+  summarise(protein = unique(protein))
+
+# write.csv(kp.filtered, "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/kp_filtered_annotations.csv")
+# 
+
+
+```
+
+## Get GO Annotations
+```{r}
+# Clean up list of loci from filter_match_table
+kp_loci <- filter_match_table %>% 
+  filter(loci != "----------") %>% 
+  filter(!str_detect(loci, stringr::regex("centroid_\\d")))
+  
+# Write list of loci to a txt file & Download locally
+write(kp_loci$loci, file = "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/kp_loci.txt")
+
+# Upload local list of loci to DAVID website & run
+## Notes - 391,825 unknown, 5227 DAVID Ids (line 1 is header) 
+## Upload output txt file with GO terms
+kp_GOterms <- read.delim("/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/kp_GOterms.txt",
+                         sep="\t", 
+                         header=TRUE, 
+                         comment.char="#", na.strings=".", 
+                         stringsAsFactors=FALSE,
+                         quote="", 
+                         fill=TRUE)
+```
+
+
+

@@ -1,0 +1,144 @@
+---
+title: "DESeq_starter"
+author: "Tanvi Ingle"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_libraries, include=FALSE}
+require(data.table)
+require(tximport)
+require(rhdf5)
+require(DESeq2)
+require(parallel)
+require(tidyverse)
+require(dplyr)
+require(tidyr)
+require(readr)
+library(rlang)
+install.packages("rlang")
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+
+```
+
+# Filepath setup
+Using basedir like this can be a little sloppy. You may want to look into the here package which handles file paths rather eloquently:  https://malco.io/2018/11/05/why-should-i-use-the-here-package-when-i-m-already-using-projects/
+```{r filepaths}
+basedir <- "/stor/work/Wilke/tingle/WGCNA_expanded"
+dir_in <- "K.pneumoniae" # Can make this a parameter later so it's generalizable
+basedir <- paste0(basedir,
+                  "/",
+                  dir_in)
+```
+
+# Import data from Kallisto
+For a deeper dive on what's going on, check out the DESeq2 vignette:
+http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+
+## To do list:
+
+1. Import run info file as tx_im. This has all the SRR numbers and a bunch of other info that may be useful down the road. 
+2. Use the run column tx_im to make a list with filepaths of all abundance.h5 files from Kallisto. Name the list with the same run column.
+3. Filter your list based on samples we actually analyzed (i.e. folders in Kallisto_results) and samples with decent coverage (look at reads pseudoaligned vs. total reads in the log files in stdout, set some cutoff)
+4. Use list and tximport to load Kallisto data.
+5. Maybe format output from tximport with appropriate rownames (not sure on this, you probably don't have to)
+
+```{r import_data, eval=FALSE}
+# Step 1: Import Run Info
+tx_im <- fread(paste0(basedir,
+                      "/SraRunInfo.csv"))
+
+# Step 2: Get file paths to each abundance.h5 file. Merge with tx_im.
+get.files <- (list.files(path="/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/Kallisto_results"))
+first.col <- paste0("X.",get.files[1],".")
+first.entry <- data.frame( first.col = "filler", name = "filler", Run = get.files[1])
+
+format.files <- as.data.frame(strsplit(get.files, split=" ", fixed = FALSE, perl = FALSE, useBytes = FALSE)) %>% 
+  pivot_longer(-first.col, names_to = "name", values_to = "Run") %>% 
+  bind_rows(first.entry) %>% 
+  select(Run) %>% 
+  filter(Run != 'stdout') %>% 
+  mutate(`Filename` = file.path(basedir, dir_in, Run, "abundance.h5",fsep="/"))
+
+tx_im <- merge(tx_im, format.files, by ="Run")
+
+# Step 3: Filter based on coverage 
+coverage.df <- read.csv("/stor/work/Wilke/tingle/WGCNA_expanded/coverage.csv", header = FALSE, sep = " ")
+
+coverage.runs <- coverage.df %>% 
+  select(V1) %>% 
+  filter(row_number() %% 2 != 0) %>% 
+  transmute(Run = V1)
+  # mutate(type = rep(c("Run", "Processing"), length.out = n())) %>% 
+  # group_by(type) %>% 
+  # mutate(id = row_number()) %>% 
+  # spread(type, V1) %>% 
+  # select(-id, -Processing) 
+
+coverage1.df <- coverage.df %>% 
+  select(V3, V5) %>% 
+  filter(row_number() %% 2 != 1) %>% 
+  transmute(Processed = as.numeric(gsub(",", "", V3)),
+            Pseudoalign = as.numeric(gsub(",", "", V5))) %>% 
+  mutate(coverage = Pseudoalign/Processed) %>% 
+  bind_cols(coverage.runs) %>% 
+  filter(coverage > 0.6) %>% 
+  ggplot() +
+  geom_histogram(aes(x=coverage))
+
+tx_im <- merge(tx_im, coverage.df, by="Run")
+ 
+
+# Filter step goes here
+files.in <- tx_im$Filename
+names(files.in) <- tx_im$Sample
+tx_obj <- tximport(files=files.in,type="kallisto",txOut=TRUE) # We use txOut = true because our transcripts are genes. This isn't true for eukaryotes
+rownames(tx_obj$counts) <- as.character(rownames(tx_obj$counts)) # Idk if you need to do this but you can
+
+```
+
+# DESeq setup and analysis
+## To do list:
+1. Make a coldata object that tells DESeq what samples we have.
+2. Make out DESeq object from our tximport data.
+3. Estimate size factors
+4. Maybe filter based on some cutoff for reads number across the rows. I'd leave this out for now and maybe add it later.
+```{r DESeq2, eval=FALSE}
+coldata <-
+  data.frame(strain = tx_im$Cory_notes,
+             row.names = tx_im$Run)
+
+
+dds <- DESeqDataSetFromTximport(tx_obj, coldata, ~ strain)
+dds <- estimateSizeFactors(dds)
+
+# Read filtering step. We can try this out later, not worth it at them moment
+# idx <- rowSums( counts(dds, normalized=TRUE) >= 10 ) >= 100
+# dds <- dds[idx,]
+dds.out <- DESeq(dds,parallel=TRUE) # look into specifying number of threads if possible
+
+# vst stands for variance stabilizing transformation. Per the DESeq vignette:
+# The point of these two transformations, the VST and the rlog, is to remove 
+# the dependence of the variance on the mean, particularly the high variance 
+# of the logarithm of count data when the mean is low.
+# The data.frame(assay()) call just converts the vst data to a dataframe that we can write to a file.
+count.out<-data.frame(assay(vst(dds.out, blind=TRUE)))
+count.out$vc_names<-rownames(count.out)
+fwrite(count.out,pase0(basedir, 
+                       "/", 
+                       dir_in,
+                       "_DESeq.csv")
+```
+
+
+
+
+
+

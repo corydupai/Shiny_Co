@@ -1,0 +1,335 @@
+---
+title: "Gene_Enrichment"
+author: "Tanvi Ingle"
+date: "7/25/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(seqinr) # may have issues with installation
+library(parallel)
+library(WGCNA)
+library(data.table)
+library(tidyverse)
+library(tidygraph)
+library(ggrepel)
+library(cowplot)
+library(ggraph) # may have issues with installation 
+library(igraph)
+library(DOSE)
+library(parallel)
+library(clusterProfiler) # requires ggplotify
+library(KEGGREST)  # may have issues with installation
+library(qdapTools) # may have issues with installation
+library(OpenImageR)
+
+
+```
+
+
+# Get Relevant File Names
+```{r}
+kegg_annotations <- "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/kp_filtered_annotations.csv"
+graph_rds <- "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/filtered_graph_0.10.RDS"
+go_annotations <- "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/kp_GOterms.txt"
+match_table <- "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/panoct_output/pangenome/results/matchtable.txt"
+centroid_annotations <- "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/cutoff_9.fasta"
+
+```
+
+# Format KEGG terms
+## Merge centroid|dynamicColors with centroid|annotations|protein
+```{r}
+# Get Graph Information & turn into dataframe 
+dynamicColors_df <- readRDS(graph_rds) %>% 
+  activate(nodes) %>% 
+  as.data.frame() %>% 
+  rename(centroid = name)
+
+# Format kegg_annotations, merge with dynamicColors,  seperate by pathway and 
+kegg_filtered <- read.csv(kegg_annotations) %>% 
+  select(-X) %>% 
+  group_by(centroid) %>% 
+  mutate(annotations = unique(annotations)) %>% 
+  # summarise(annotations = unique(annotations)) %>% 
+  merge(dynamicColors_df, by = "centroid")
+
+# Split into two dataframes - one for pathway codes and the other for enzyme codes
+kegg_enzymes <- kegg_filtered %>% 
+  filter(stringr::str_detect(annotations, stringr::regex("[:blank:]\\d\\."))) %>% 
+  rename(enzyme = annotations)
+
+kegg_pathway <- kegg_filtered %>% 
+  filter(!stringr::str_detect(annotations, stringr::regex("[:blank:]\\d\\."))) %>% 
+  rename(pathway = annotations)
+
+```
+
+# Merge centroid|dynamicColors with loci|Go Terms
+```{r}
+# Get centroids and annotations datafarme
+centroids_to_annotation <- list2df(read.fasta(centroid_annotations)) %>% 
+  select(-X1) %>% 
+  mutate(centroid = X2) %>% 
+  separate(`X2`, c("centroid_text", "id"), "_" ) %>% 
+  select(-centroid_text) %>% 
+  group_by(id) %>% 
+  summarise(id_number = unique(id)) %>% 
+  select(id_number)
+
+
+# Merge centroids & match table to filter; make longer
+filter_match_table <- read.table(match_table, header = FALSE) %>% 
+  rename(id_number = V1) %>% 
+  merge(centroids_to_annotation, by="id_number") %>% 
+  pivot_longer(-id_number) %>% 
+  select(-name) %>% 
+  rename(loci = value)
+
+# This has locus tag | Go Terms
+# Merge kp_GOterms with filter_match_table which has id # | locus_tag
+# Then, Merge with dy_col_df which has centroid_# | dynamicColor 
+GO_terms <- read.delim(go_annotations,
+                         sep="\t", 
+                         header=TRUE, 
+                         comment.char="#", na.strings=".", 
+                         stringsAsFactors=FALSE,
+                         quote="", 
+                         fill=TRUE) %>% 
+  mutate(loci = ID) %>% 
+  merge(filter_match_table, by = "loci") %>% 
+  mutate(centroid = paste0("centroid_", id_number)) %>% 
+  select(-id_number) %>% 
+  merge(dynamicColors_df, by = "centroid") %>% 
+  separate_rows(GOTERM_BP_DIRECT, sep=",") %>% 
+  separate_rows(GOTERM_CC_DIRECT, sep=",") %>% 
+  separate_rows(GOTERM_MF_DIRECT, sep=",")
+```
+
+# Format Gene List & Get Enriched Functions 
+```{r}
+get_genelist <- function(df, column_name){
+    
+    g_sym = ";"
+
+    column_name <- sym(column_name)
+    
+    GL <- df %>%
+    select(centroid,
+           dynamicColors,
+           !!column_name) %>%
+    mutate(term_col = as.list(str_split(!!column_name, g_sym))) %>%
+    unnest(cols = c(term_col)) %>%
+      filter(!is.na(term_col) &
+               term_col != "") %>%
+    select(centroid,
+           dynamicColors,
+           term_col)
+  }
+
+
+get_enriched <-
+  function(dc, df, Domain) {
+    en_res <-
+      enricher(gene = df %>%
+           filter(dynamicColors == dc) %>%
+           select(gene = centroid) %>%
+           unlist(),
+         TERM2GENE = df %>% select(
+           term = term_col,
+           gene = centroid)
+           ) %>%
+      as_tibble() %>%
+      mutate(dynamicColors = dc,
+             Domain = Domain)
+  }
+
+```
+
+
+## Get KEGG Enrichments
+```{r}
+kegg_pathway_list <- get_genelist(kegg_pathway, "pathway")
+kegg_enzymes_list <- get_genelist(kegg_enzymes, "enzyme")
+
+
+net_colors <- kegg_filtered$dynamicColors %>%
+  unique() %>%
+  as.character() %>%
+  unlist()
+
+KEGG_terms <-
+  bind_rows(
+    lapply(net_colors, 
+         FUN = get_enriched,
+         df = kegg_pathway_list,
+         Domain = "KEGG Pathways"),
+    lapply(net_colors,
+         FUN = get_enriched,
+         df = kegg_enzymes_list,
+         Domain = "KEGG Enzymes")
+    ) %>%
+  # This filters and formats the output
+  mutate(full_counts =
+           gsub(".*\\/", "", GeneRatio) %>%
+           as.numeric(),
+         ratio = Count / full_counts,
+         Term = ID,
+         Bg_Counts = gsub("\\/.*", "", BgRatio) %>%
+           as.numeric(),
+         Bg_Totals = gsub(".*\\/", "", BgRatio) %>%
+           as.numeric(),
+         BR = Bg_Counts/Bg_Totals,
+         qvalue = if_else(is.na(qvalue),0,
+                          qvalue)) %>%
+  filter(qvalue <= 0.05)
+
+
+# 
+# test_k_list <- get_genelist(kegg_filtered, "annotations")
+# 
+# test_k <-
+#   bind_rows(
+#     mclapply(net_colors, 
+#          FUN = get_enriched,
+#          df = test_k_list,
+#          Domain = "test_k")
+#     ) %>%
+#   # This filters and formats the output
+#   mutate(full_counts =
+#            gsub(".*\\/", "", GeneRatio) %>%
+#            as.numeric(),
+#          ratio = Count / full_counts,
+#          Term = ID,
+#          Bg_Counts = gsub("\\/.*", "", BgRatio) %>%
+#            as.numeric(),
+#          Bg_Totals = gsub(".*\\/", "", BgRatio) %>%
+#            as.numeric(),
+#          BR = Bg_Counts/Bg_Totals,
+#          qvalue = if_else(is.na(qvalue),0,
+#                           qvalue)) %>%
+#   filter(qvalue <= 0.05)
+# 
+
+
+
+```
+
+## Get GO Enrichments
+```{r}
+go_bp <- get_genelist(GO_terms, "GOTERM_BP_DIRECT")
+go_cc <- get_genelist(GO_terms, "GOTERM_CC_DIRECT")
+go_mf <- get_genelist(GO_terms, "GOTERM_MF_DIRECT")
+
+GO_terms <-bind_rows(
+    mclapply(net_colors, 
+         FUN = get_enriched,
+         df = go_bp,
+         Domain = "Biological Process"),
+    mclapply(net_colors,
+         FUN = get_enriched,
+         df = go_cc,
+         Domain = "Cellular Component"),
+    mclapply(net_colors,
+         FUN = get_enriched,
+         df = go_mf,
+         Domain = "Molecular Function")
+    ) %>%
+  # This filters and formats the output
+  mutate(full_counts =
+           gsub(".*\\/", "", GeneRatio) %>%
+           as.numeric(),
+         ratio = Count / full_counts,
+         Term = ID,
+         Bg_Counts = gsub("\\/.*", "", BgRatio) %>%
+           as.numeric(),
+         Bg_Totals = gsub(".*\\/", "", BgRatio) %>%
+           as.numeric(),
+         BR = Bg_Counts/Bg_Totals,
+         qvalue = if_else(is.na(qvalue),0,
+                          qvalue)) %>%
+  filter(qvalue <= 0.05) 
+```
+
+## Inspecting Each Subnetwork (DynamicColors)
+```{r}
+
+# subnetwork <- "ivory"
+# subnetwork_test<- KEGG_terms %>%
+#   filter(dynamicColors == subnetwork) %>%
+#   rbind(GO_terms %>% filter(dynamicColors == subnetwork)) %>%
+#   mutate(log_qvalue = `-log(qvalue)`)
+
+# subnetwork_test<- KEGG_terms %>%
+#   rbind(GO_terms) %>%
+#   mutate(`-log(qvalue)`= -log(qvalue))
+# 
+# write.csv(subnetwork_test, "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/test_annot.csv")
+
+enrich_plots_func <- function(subnetwork){
+
+  enrich_plot <- subnetwork_test %>% 
+  filter(dynamicColors == subnetwork) %>% 
+  group_by(Domain) %>% 
+  ggplot(aes(y = ID, x = "", fill = `-log(qvalue)`)) +
+  # facet_wrap(~Domain, ncol=1) +
+  # geom_tile(aes(y = ID, x = ""), 
+  #           fill = "grey94", inherit.aes = F, height = 2, width = 3) +
+  geom_tile(color = "black", size = 1) +
+  scale_fill_viridis(
+                       #  low = "steelblue2",
+                       # high = "royalblue4",
+                       # na.value = "grey50",
+                       limits = c(0,20)) +
+  scale_x_discrete(expand = c(0,0),
+                   position = "top",
+                   name = "Sub Network\n") +
+  scale_y_discrete(expand = c(0,0))+
+  guides(fill = 
+           guide_colourbar(
+                           title.position="top",
+                           title.hjust = 0.5)) +
+  facet_grid(Domain ~ .,
+               scales = "free_y",
+               space = "free_y") +
+  # ggtitle(paste0("Gene Enrichment for Subnetwork: ", subnetwork)) +
+  theme_cowplot(12) +
+  theme(panel.border = element_rect(colour = "black",
+                                    size = 0.5),
+        axis.line = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom",
+        legend.justification = "center",
+        legend.key.width = unit(40, "points"),
+        text = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        axis.text.x = element_text(size = 12),
+        strip.background = element_blank(),
+        strip.text = element_text(colour = "black"),
+        axis.title = element_blank(),
+        title = element_text(hjust = 0)
+        )
+  
+   save_plot(paste0(subnetwork, ".png"), enrich_plot, base_height = 9, base_aspect_ratio = 0.8)
+  # plotPNG(width = 400, height = 500, type = "png", file = "/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/red.png")
+}
+
+
+enrich_plots_func("darkred")
+# 
+# r = rotateImage(readImage("/stor/work/Wilke/tingle/WGCNA_expanded/K.pneumoniae/red.png"), 180, threads = 10)
+# 
+# save_plot("r.png", r)
+
+```
+
+```{r}
+ 
+  dynamicColors <- as.data.frame(unique(dynamicColors_df$dynamicColors))
+  names(dynamicColors) <- c("dynamicColors")
+  
+  t <- as.vector.factor(sort(unique(dynamicColors_df$dynamicColors)))
+```
+

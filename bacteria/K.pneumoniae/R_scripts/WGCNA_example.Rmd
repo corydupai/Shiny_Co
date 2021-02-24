@@ -1,0 +1,248 @@
+---
+title: "WGCNA_example"
+author: "Tanvi Ingle & Cory DuPai"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+Sys.umask("000")
+```
+---
+output: html_document
+editor_options: chunk_output_type: console
+---
+```{r}
+library(parallel)
+library(WGCNA)
+library(data.table)
+library(tidyverse)
+library(ggraph)
+library(tidygraph)
+library(ggrepel)
+library(cowplot)
+library(ggraph)
+library(igraph)
+library(seqinr)
+theme_set(theme_cowplot(12))
+```
+
+# Notes
+Most of this comes from the WGCNA tutorial: https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/FemaleLiver-02-networkConstr-man.pdf.
+If you'd like to know a little more behind the math, this explains things but is a little dense for me: https://horvath.genetics.ucla.edu/html/GTOM/old/GTOM_tech_report.pdf
+```{r filepaths}
+Sys.umask("000") # This set read/write access so anyone can edit files you write
+basedir <- "/stor/work/Wilke/tingle/WGCNA_expanded/bacteria"
+dir_in <- "K.pneumoniae" # Can make this a parameter later so it's generalizable
+basedir <- paste0(basedir,
+                  "/",
+                  dir_in)
+```
+
+```{r data_setup}
+# Read in the normalized counts data from DESeq
+count.out<- fread(paste0(basedir,"/",dir_in,"_DESeq.csv"))
+# count.part <- head(count.out)
+
+# Make a count matrix, columns are loci, rows are samples
+count.mat <- as.data.frame(t(count.out[,!c("locus_tags")])) 
+names(count.mat) <- count.out[,locus_tags] 
+rownames(count.mat) <- names(count.out[,!c("locus_tags")])
+
+# g <- head(count.mat)
+```
+
+# Notes
+https://horvath.genetics.ucla.edu/html/GTOM/GTOMYipHorvath.pdf
+
+```{r adjacency_to_TOM}
+# Calculate an adjacency matrix (correlation^power)
+adjacency <- adjacency(count.mat,
+                      type="unsigned", 
+                      power = 6)
+# Calculate TOM to minimize noise
+TOM <- TOMsimilarity(adjacency)
+# Calculated dissimilarity TOM
+dissTOM <- 1-TOM
+```
+
+
+# Notes
+Explanation of Heirarchial Clustering: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3268382/#:~:text=Commonly%20used%20distance%20and%20linkage%20methods%20to%20determine%20from%20which,separated%20by%20the%20shortest%20distance.
+```{r clust_and_colors}
+# Generate a tree based on clustering dissTOM
+geneTree <- stats::hclust(
+  as.dist(dissTOM),
+  method="mcquitty" #Weighted Pair Group Method w/ Arithmetic Mean
+  )
+
+# plot(geneTree, main = "Gene Clustering on dissimilarity TOM", labels = FALSE, hang = 0.04)
+
+# Set minimum module size. We can maybe play around with this.
+minModuleSize = 30
+
+# Module identification using dynamic tree cut:
+dynamicMods <- 
+  cutreeDynamic(dendro = geneTree, 
+                distM = dissTOM,
+                deepSplit = 2, 
+                pamRespectsDendro = FALSE,
+                minClusterSize = minModuleSize)
+
+table(dynamicMods) # Why repeats? 
+
+#remove(dissTOM) # This just frees up some space, we don't need dissTOM anymore
+
+# Convert numeric lables into colors
+dynamicColors <- labels2colors(dynamicMods)
+table(dynamicColors) # Make a table showing modules
+
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05, main = "Gene Dendrogram with module colors")
+
+# Doesnt work - makes R grumpy 
+diag(dissTOM) = NA
+# TOMplot(dissTOM^4, geneTree, as.character(dynamicColors))
+# TOMplot(dissTOM, geneTree, as.character(dynamicColors))
+
+# This code makes larger clusters/subnetworks. It's probably unnecessary but we
+# can always loop back to it later.
+# # Calculate eigengenes
+# MEList = moduleEigengenes(datExpr0, colors = dynamicColors)
+# MEs = MEList$eigengenes
+# # Calculate dissimilarity of module eigengenes
+# MEDiss = 1-cor(MEs);
+# # Cluster module eigengenes
+# METree = hclust(as.dist(MEDiss), method = "average");
+# 
+# MEDissThres = 0.25
+# # Call an automatic merging function
+# merge = mergeCloseModules(datExpr0, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+# # The merged module colors
+# mergedColors = merge$colors;
+# # Eigengenes of the new merged modules:
+# mergedMEs = merge$newMEs
+# 
+# # Rename to moduleColors
+# # moduleColors = mergedColors
+# moduleColors = dynamicColors
+# # Construct numerical labels corresponding to the colors
+# colorOrder = c("grey", standardColors(50));
+# moduleLabels = match(moduleColors, colorOrder)-1;
+# MEs = mergedMEs
+# table(mergedColors)
+
+```
+
+```{r cytoscape}
+# Apply correlation signs to TOM
+sign.it <- cor(count.mat)
+sign.it[sign.it<0] <- (-1)
+sign.it[sign.it>0] <- (1)
+TOM <- TOM*sign.it
+
+# Get node labels and colors in one place
+node_labels <- tibble(gene=colnames(adjacency)) %>%
+  cbind(dynamicColors)
+
+# This just reduces the file size by limiting
+# significant digits
+# tempTOM <- round(TOM,digits=6)
+
+
+# You'll have to edit the file names here. This is for
+# visualization with cytoscape.
+# cyt = exportNetworkToCytoscape(tempTOM,
+# edgeFile = paste0(basedir, "/network/edge_0.10.txt"),
+# nodeFile = paste0(basedir, "/network/node_0.10.txt"),
+# weighted = T,
+# threshold = 0.10,
+# nodeNames = node_labels$gene,
+# nodeAttr = node_labels$dynamicColors)
+```
+
+```{r tbl_graph}
+# Load in graph as tbl_graph for visualizations later.
+# We'll have to work on where to go from here but this is a good start.
+
+# saveRDS(tempTOM,paste0(basedir,"/full_graph_as_TOM.RDS"))
+# tempTOM <- readRDS(paste0(basedir,"/full_graph_as_TOM.RDS"))
+# 
+centroid_info <- 
+  read.fasta(
+    paste0(basedir,
+           "/panoct_output/pangenome/results/centroids.fasta"),
+    strip.desc = TRUE) %>%
+  getAnnot() %>% 
+  unlist() %>%
+  as_tibble() %>%
+  mutate(name = str_remove(value, " .*"),
+         value = str_remove(value, paste0(name," ")),
+         cent_gene = str_remove(value, " .*"),
+         gene = str_remove(value, paste0(cent_gene," "))) %>%
+  select(name, gene)
+
+in_g <- as_tbl_graph(graph_from_adjacency_matrix(TOM,weighted = T,diag=F)) %>%
+  activate(nodes) %>%
+  mutate(row_num = row_number()) %>%
+  left_join(node_labels, c("name"="gene")) %>%
+  activate(edges) %>%
+  filter(abs(weight)>=0.1) %>%
+  activate(nodes) %>%
+  left_join(centroid_info) %>%
+  group_by(dynamicColors) %>%
+  mutate(node_size = n()) %>%
+  ungroup() %>%
+  arrange(node_size) %>%
+  mutate(dynamicColors = fct_reorder(dynamicColors,node_size, min),
+         network = paste0("Network_",as.numeric(dynamicColors))) %>%
+  arrange(row_num) %>%
+  mutate(network = fct_reorder(network, node_size)) %>%
+  mutate(node_filter = centrality_degree()) %>%
+  filter(node_filter > 1) %>%
+  mutate(row_num = row_number())
+  
+
+from_nodes <- in_g %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  select("from" = row_num, "from_node" = name)
+
+to_nodes <- from_nodes %>%
+  dplyr::rename("to" = from, "to_node" = from_node)
+
+in_g <- in_g %>%
+  activate(edges) %>%
+  left_join(from_nodes) %>%
+  left_join(to_nodes) 
+
+corr_mat <- in_g %>%
+  activate(edges) %>%
+  as_tibble() %>%
+  select(to_node,from_node,weight) 
+
+saveRDS(corr_mat,paste0(basedir,"/data4app/genes_of_interest.RDS"))
+saveRDS(in_g,paste0(basedir,"/data4app/filtered_graph_0.10.RDS"))
+in_g <- readRDS(paste0(basedir,"/data4app/filtered_graph_0.10.RDS"))
+
+
+# print(in_g %>% activate(nodes) %>% select(network, node_size) %>% as_tibble %>% unique)             
+
+# This might help keep things clean as we expand the analysis
+# remove(tempTOM, TOM)
+```
+
+
+## Notes to Self
+GTOM with Gene Networks https://horvath.genetics.ucla.edu/html/GTOM/old/GTOM_tech_report.pdf
+
+GTOM ppt https://horvath.genetics.ucla.edu/html/GTOM/GTOMYipHorvath.pdf
+
+Heirarchial Clustering in R
+https://www.datanovia.com/en/lessons/agglomerative-hierarchical-clustering/
+
+How to choose a clustering method https://www.cmu.edu/joss/content/articles/volume15/Pimentel.pdf
+
+Dynmaic Tree Cut https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/BranchCutting/Supplement.pdf
+
+WGCNA Tutorial https://hms-dbmi.github.io/scw/WGCNA.html
