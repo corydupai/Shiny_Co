@@ -7,7 +7,7 @@ library(parallel)
 library(clusterProfiler)
 library(KEGGREST)
 library(qdapTools)
-library(OpenImageR)
+library(tidygraph)
 
 #' Calculates enrichment for specific term.
 #' 
@@ -59,19 +59,17 @@ get_enriched <-
   }
 
 
-
-
 #' Calculates gene enrichment scores for KEGG and GO terms and writes output.
 #' 
 #' @param basedir The base directory.
 #' 
 get_enriched_terms <- function(basedir){
 
-kegg_annotations <- paste0(basedir, "filtered_annotations.csv")
-graph_rds <- paste0(basedir,"data4app/filtered_graph_0.10.RDS")
-go_annotations <- paste0(basedir, "GOterms.txt")
-match_table <- paste0(basedir, "panoct_output/pangenome/results/matchtable.txt")
-centroid_annotations <- paste0(basedir, "cutoff_9.fasta")
+kegg_annotations <- paste0(basedir, "/filtered_annotations.csv")
+graph_rds <- paste0(basedir,"/data4app/filtered_graph_0.10.RDS")
+go_annotations <- paste0(basedir, "/GOterms.txt")
+match_table <- paste0(basedir, "/panoct_output/pangenome/results/matchtable.txt")
+centroid_annotations <- paste0(basedir, "/cutoff_9.fasta")
 
 # Format KEGG terms
 ## Merge centroid|dynamicColors with centroid|annotations|protein
@@ -85,8 +83,9 @@ dynamicColors_df <- readRDS(graph_rds) %>%
 kegg_filtered <- read.csv(kegg_annotations) %>% 
   select(-X) %>% 
   group_by(centroid) %>% 
-  mutate(annotations = unique(annotations)) %>% 
-  # summarise(annotations = unique(annotations)) %>% 
+  mutate(
+    annotations = str_remove_all(annotations, " \\[.*\\]$"),
+    annotations = unique(annotations)) %>% 
   merge(dynamicColors_df, by = "centroid")
 
 # Split into two dataframes - one for pathway codes and the other for enzyme codes
@@ -108,7 +107,6 @@ centroids_to_annotation <- list2df(read.fasta(centroid_annotations)) %>%
   group_by(id) %>% 
   summarise(id_number = unique(id)) %>% 
   select(id_number)
-
 
 # Merge centroids & match table to filter; make longer
 filter_match_table <- read.table(match_table, header = FALSE) %>% 
@@ -135,8 +133,15 @@ GO_terms <- read.delim(go_annotations,
   merge(dynamicColors_df, by = "centroid") %>% 
   separate_rows(GOTERM_BP_DIRECT, sep=",") %>% 
   separate_rows(GOTERM_CC_DIRECT, sep=",") %>% 
-  separate_rows(GOTERM_MF_DIRECT, sep=",")
+  separate_rows(GOTERM_MF_DIRECT, sep=",") %>%
+  mutate(GOTERM_BP_DIRECT = 
+           str_remove(GOTERM_BP_DIRECT,"GO:[0-9]{7}~"),
+         GOTERM_CC_DIRECT = 
+           str_remove(GOTERM_CC_DIRECT,"GO:[0-9]{7}~"),
+         GOTERM_MF_DIRECT = 
+           str_remove(GOTERM_MF_DIRECT,"GO:[0-9]{7}~"))
 
+write.csv(GO_terms, paste0(basedir,"/data4app/Goterms.csv"))
 
 ## Get KEGG Enrichments
 kegg_pathway_list <- get_genelist(kegg_pathway, "pathway")
@@ -179,8 +184,8 @@ go_bp <- get_genelist(GO_terms, "GOTERM_BP_DIRECT")
 go_cc <- get_genelist(GO_terms, "GOTERM_CC_DIRECT")
 go_mf <- get_genelist(GO_terms, "GOTERM_MF_DIRECT")
 
-GO_terms <-bind_rows(
-  mclapply(net_colors, 
+GO_terms <- bind_rows(
+  mclapply(net_colors,
            FUN = get_enriched,
            df = go_bp,
            Domain = "Biological Process"),
@@ -212,7 +217,7 @@ subnetwork_out<- KEGG_terms %>%
   rbind(GO_terms) %>%
   mutate(`-log(qvalue)`= -log(qvalue))
 
-write.csv(subnetwork_out, paste0(basedir,"data4app/enriched_terms.csv"))
+write.csv(subnetwork_out, paste0(basedir,"/data4app/enriched_terms.csv"))
 return("done")
 }
 
@@ -235,12 +240,12 @@ get_annotations.func <- function(loci)
 #' 
 GO_and_KEGG <- function(basedir){
   # Get Bacteria Directory 
-  ```{r}
+
 
   bacdir <- "K.pneumoniae/"
   bac_initials <- "kp"
   bac_name <- "Klebsiella pneumoniae"
-  ```
+  
   
   # Get Bacterial Files
   cutoff_9 <- list2df(read.fasta(paste0(basedir, "cutoff_9.fasta")))
@@ -327,9 +332,6 @@ GO_and_KEGG <- function(basedir){
   # 
   write.csv(bac_filtered, paste0(basedir, "filtered_annotations.csv"))
   
-
-  
-  
   ## Get GO Annotations
   # To access the GO annotations for each loci, I downloaded the list of loci 
   # locally and uploaded it to the DAVID website (https://david.ncifcrf.gov/). 
@@ -359,4 +361,3 @@ write(bac_loci$loci, file = paste0(basedir, "loci.txt"))
 return("Done")
 
 }
-
